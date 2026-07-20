@@ -8,7 +8,8 @@
 # relay to deploy and no client secret to manage. Enable both under
 # Netlify -> Site configuration -> Identity, then invite yourself.
 backend:
-  name: git-gateway
+  name: github
+  repo: ktsapphub/KTSapps
   branch: main
 
 # Not on Netlify? Swap the block above for this, and deploy the small
