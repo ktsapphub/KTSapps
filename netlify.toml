@@ -1,0 +1,10 @@
+[build]
+  command  = "npm run build"
+  publish  = "_site"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Set UMAMI_HOST, UMAMI_WEBSITE_ID, UMAMI_API_KEY (or UMAMI_USERNAME +
+# UMAMI_PASSWORD) and STATS_PASSWORD under Site settings → Environment variables.

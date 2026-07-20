@@ -1,0 +1,164 @@
+---
+layout: base.njk
+permalink: /stats/index.html
+pageTitle: "Stats — KTSapps"
+pageDescription: "Private analytics dashboard."
+noindex: true
+hideLoader: true
+---
+
+{# Password gate. Shown until /api/stats accepts the password. #}
+<section class="gate" id="gate">
+  <form class="gate__card" id="gateForm" autocomplete="off">
+    <h1>Stats</h1>
+    <p>Private dashboard. Traffic for ktsapps.com, straight from Umami.</p>
+    <div class="field">
+      <label for="pw">Password</label>
+      <input type="password" id="pw" name="password" required autocomplete="current-password" />
+    </div>
+    <p class="gate__err" id="gateErr" role="alert" aria-live="polite"></p>
+    <button class="btn btn--primary" type="submit" id="gateBtn">Unlock</button>
+  </form>
+</section>
+
+{# Dashboard. Hidden until unlocked. #}
+<section class="wrap dash" id="dash" hidden>
+  <div class="dash__head">
+    <div>
+      <span class="sec__label">Analytics</span>
+      <h1 class="sec__title" style="font-size:clamp(28px,4vw,44px);margin:0">Who&rsquo;s visiting</h1>
+    </div>
+    <div class="range" role="group" aria-label="Time range">
+      <button type="button" data-range="24h" aria-pressed="false">24h</button>
+      <button type="button" data-range="7d"  aria-pressed="true">7d</button>
+      <button type="button" data-range="30d" aria-pressed="false">30d</button>
+      <button type="button" data-range="12mo" aria-pressed="false">12mo</button>
+    </div>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+  <div class="panels" id="panels"></div>
+
+  <p class="dash__note" id="note"></p>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  var gate = document.getElementById('gate');
+  var dash = document.getElementById('dash');
+  var form = document.getElementById('gateForm');
+  var err  = document.getElementById('gateErr');
+  var btn  = document.getElementById('gateBtn');
+  var pw   = '';
+  var range = '7d';
+
+  var nf = new Intl.NumberFormat('en-US');
+
+  function load(range) {
+    return fetch('/api/stats', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: pw, range: range })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.error || ('Request failed (' + r.status + ')'));
+        return d;
+      });
+    });
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    pw = document.getElementById('pw').value;
+    err.textContent = '';
+    btn.disabled = true; btn.textContent = 'Checking…';
+
+    load(range).then(function (data) {
+      gate.hidden = true;
+      dash.hidden = false;
+      render(data);
+      /* Keep it for this tab only — closing the tab locks it again. */
+      try { sessionStorage.setItem('kts_stats_pw', pw); } catch (e) {}
+    }).catch(function (e2) {
+      err.textContent = e2.message;
+      btn.disabled = false; btn.textContent = 'Unlock';
+    });
+  });
+
+  /* Already unlocked in this tab? Go straight in. */
+  try {
+    var saved = sessionStorage.getItem('kts_stats_pw');
+    if (saved) {
+      pw = saved;
+      load(range).then(function (data) {
+        gate.hidden = true; dash.hidden = false; render(data);
+      }).catch(function () { sessionStorage.removeItem('kts_stats_pw'); });
+    }
+  } catch (e) {}
+
+  document.querySelectorAll('.range button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('.range button').forEach(function (x) { x.setAttribute('aria-pressed', 'false'); });
+      b.setAttribute('aria-pressed', 'true');
+      range = b.dataset.range;
+      dash.style.opacity = '.5';
+      load(range).then(render).catch(function (e) {
+        document.getElementById('note').textContent = e.message;
+      }).finally(function () { dash.style.opacity = '1'; });
+    });
+  });
+
+  function kpi(label, o) {
+    var d = o.delta;
+    var arrow = d > 0 ? '▲' : d < 0 ? '▼' : '—';
+    var cls = d > 0 ? 'up' : d < 0 ? 'down' : 'flat';
+    var deltaHtml = (typeof d === 'number')
+      ? '<span class="kpi__d ' + cls + '">' + arrow + ' ' + Math.abs(d) + '% vs previous</span>' : '';
+    return '<div class="kpi">' +
+      '<span class="kpi__n">' + nf.format(o.value) + (o.suffix || '') + '</span>' +
+      '<span class="kpi__l">' + label + '</span>' + deltaHtml + '</div>';
+  }
+
+  function bars(title, rows, keyLabel) {
+    rows = (rows || []).filter(function (r) { return r && r.x; });
+    var max = rows.reduce(function (m, r) { return Math.max(m, r.y || 0); }, 0);
+    var body = rows.length
+      ? '<ul class="bars">' + rows.map(function (r) {
+          var w = max ? Math.round((r.y / max) * 100) : 0;
+          var name = r.x === '' ? '(direct)' : r.x;
+          return '<li style="--pct:' + w + '%"><span class="k">' + esc(name) + '</span>' +
+                 '<span class="v">' + nf.format(r.y) + '</span></li>';
+        }).join('') + '</ul>'
+      : '<p class="panel__empty">No ' + keyLabel + ' recorded in this period yet.</p>';
+    return '<div class="panel"><h2>' + title + '</h2>' + body + '</div>';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function render(d) {
+    document.getElementById('kpis').innerHTML =
+      kpi('Visitors', d.kpis.visitors) +
+      kpi('Pageviews', d.kpis.pageviews) +
+      kpi('Visits', d.kpis.visits) +
+      kpi('Bounce rate', d.kpis.bounceRate) +
+      kpi('Avg. visit', d.kpis.avgTime);
+
+    document.getElementById('panels').innerHTML =
+      bars('Top pages',    d.panels.urls,      'pages') +
+      bars('Referrers',    d.panels.referrers, 'referrers') +
+      bars('Countries',    d.panels.countries, 'countries') +
+      bars('Devices',      d.panels.devices,   'devices') +
+      bars('Events',       d.panels.events,    'events');
+
+    document.getElementById('note').innerHTML =
+      'Updated ' + new Date(d.generatedAt).toLocaleString() +
+      ' · <a href="/">back to site</a>';
+  }
+})();
+</script>

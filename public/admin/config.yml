@@ -1,0 +1,165 @@
+# ============================================================
+#  KTSapps — CMS schema
+#  Editing anything here writes JSON back to src/_data/ and
+#  commits it. Your host sees the commit and rebuilds the site.
+# ============================================================
+
+# Netlify Identity + Git Gateway handles the login, so there's no OAuth
+# relay to deploy and no client secret to manage. Enable both under
+# Netlify -> Site configuration -> Identity, then invite yourself.
+backend:
+  name: git-gateway
+  branch: main
+
+# Not on Netlify? Swap the block above for this, and deploy the small
+# sveltia-cms-auth Worker (https://github.com/sveltia/sveltia-cms-auth):
+#
+# backend:
+#   name: github
+#   repo: ktsapphub/KTSapps
+#   branch: main
+#   base_url: https://sveltia-cms-auth.<your-subdomain>.workers.dev
+#   auth_endpoint: auth
+
+# Uploaded images/video land here and are served from /assets/uploads/...
+media_folder: "public/assets/uploads"
+public_folder: "/assets/uploads"
+
+publish_mode: simple
+site_url: https://ktsapps.com
+display_url: https://ktsapps.com
+logo_url: /assets/uploads/cms-logo.png
+
+collections:
+  # ----------------------------------------------------------
+  - name: content
+    label: "Page content"
+    files:
+
+      # ---------------- Site + sections ----------------
+      - name: site
+        label: "Site & sections"
+        file: "src/_data/site.json"
+        description: "Global settings, which sections appear, the scrolling band, and analytics."
+        fields:
+          - { name: title,       label: "Browser / SEO title", widget: string }
+          - { name: description, label: "SEO description",     widget: text }
+          - { name: url,         label: "Canonical URL",       widget: string, default: "https://ktsapps.com" }
+          - { name: logoMark,    label: "Logo — bold part",    widget: string, default: "KTS", hint: "Each letter animates in separately." }
+          - { name: logoSuffix,  label: "Logo — gradient part",widget: string, default: "apps" }
+          - { name: ogImage,     label: "Social share image",  widget: image, required: false }
+
+          - name: sections
+            label: "Show / hide sections"
+            widget: object
+            fields:
+              - { name: hero,     label: "Hero",             widget: boolean, default: true }
+              - { name: marquee,  label: "Scrolling band",   widget: boolean, default: true }
+              - { name: projects, label: "Projects grid",    widget: boolean, default: true }
+              - { name: about,    label: "About / the idea", widget: boolean, default: true }
+              - { name: contact,  label: "Contact",          widget: boolean, default: true }
+
+          - name: marquee
+            label: "Scrolling band"
+            widget: object
+            fields:
+              - { name: speedSeconds, label: "Seconds per loop", widget: number, default: 34, value_type: int, min: 10, max: 120 }
+              - { name: items, label: "Phrases", widget: list, field: { name: item, label: "Phrase", widget: string } }
+
+          - name: analytics
+            label: "Analytics"
+            widget: object
+            fields:
+              - { name: enabled,   label: "Tracking on", widget: boolean, default: true }
+              - { name: scriptUrl, label: "Umami script URL", widget: string, hint: "e.g. https://analytics.ktsapps.com/script.js" }
+              - { name: websiteId, label: "Umami website ID",  widget: string }
+              - { name: trackOutboundClicks, label: "Track clicks out to projects", widget: boolean, default: true }
+
+          - { name: footerNote, label: "Footer note", widget: string, required: false }
+
+      # ---------------- Hero ----------------
+      - name: hero
+        label: "Hero"
+        file: "src/_data/hero.json"
+        fields:
+          - { name: eyebrow, label: "Eyebrow line", widget: string, required: false }
+          - { name: subhead, label: "Subheadline",  widget: markdown, buttons: [bold, italic], editor_components: [],
+              hint: "Italic renders as the bright highlight colour." }
+          - name: primaryCta
+            label: "Primary button"
+            widget: object
+            fields:
+              - { name: label, label: "Label", widget: string }
+              - { name: href,  label: "Link",  widget: string, default: "#apps" }
+          - name: secondaryCta
+            label: "Secondary button"
+            widget: object
+            fields:
+              - { name: label, label: "Label", widget: string }
+              - { name: href,  label: "Link",  widget: string, default: "#about" }
+
+      # ---------------- Projects ----------------
+      - name: projects
+        label: "Projects"
+        file: "src/_data/projects.json"
+        description: "Add, remove and drag to reorder. Each card flips to show its clip and numbers."
+        fields:
+          - { name: label, label: "Section label", widget: string, required: false }
+          - { name: title, label: "Section heading", widget: string, hint: "<br> allowed for a line break." }
+          - { name: intro, label: "Section intro",   widget: text, required: false }
+          - { name: note,  label: "Note under the grid", widget: string, required: false }
+          - name: items
+            label: "Projects"
+            label_singular: "Project"
+            widget: list
+            summary: "{{fields.name}} — {{fields.status}}"
+            fields:
+              - { name: name, label: "Name", widget: string }
+              - { name: status, label: "Status", widget: select,
+                  options: [ {label: "Live", value: live}, {label: "Beta", value: beta},
+                             {label: "In development", value: dev}, {label: "Concept", value: concept} ],
+                  default: dev }
+              - { name: tint, label: "Accent colour", widget: color, default: "#4fd8ff",
+                  hint: "Used for the hover glow, cover art and card border." }
+              - { name: url, label: "Subdomain URL", widget: string, required: false, default: "https://" }
+              - { name: description, label: "Description", widget: text }
+              - { name: cover, label: "Cover image", widget: image, required: false,
+                  hint: "Leave empty to use the generated monogram artwork. 16:10 works best." }
+              - { name: clip, label: "Demo clip (mp4)", widget: file, required: false,
+                  hint: "Short, muted, looping. Under ~3MB keeps the flip instant." }
+              - { name: downloads,   label: "Downloads",   widget: number, default: 0, value_type: int, min: 0 }
+              - { name: impressions, label: "Impressions", widget: number, default: 0, value_type: int, min: 0 }
+              - { name: revenue, label: "Revenue (USD)", widget: number, required: false, value_type: int, min: 0,
+                  hint: "Leave empty to show 'Not for commercial sale'." }
+
+      # ---------------- About ----------------
+      - name: about
+        label: "About / the idea"
+        file: "src/_data/about.json"
+        fields:
+          - { name: label, label: "Section label", widget: string, required: false }
+          - { name: creed, label: "Statement", widget: markdown, buttons: [bold, italic], editor_components: [],
+              hint: "Italic renders as the gradient highlight. Words light up as the reader scrolls." }
+          - name: pillars
+            label: "Pillars"
+            widget: list
+            summary: "{{fields.title}}"
+            fields:
+              - { name: title, label: "Title", widget: string }
+              - { name: body,  label: "Body",  widget: text }
+
+      # ---------------- Contact ----------------
+      - name: contact
+        label: "Contact"
+        file: "src/_data/contact.json"
+        fields:
+          - { name: label, label: "Section label", widget: string, required: false }
+          - { name: title, label: "Heading", widget: string, hint: "<br> allowed." }
+          - { name: email, label: "Email address", widget: string }
+          - name: socials
+            label: "Social links"
+            widget: list
+            summary: "{{fields.label}}"
+            fields:
+              - { name: label, label: "Label", widget: string }
+              - { name: href,  label: "URL",   widget: string }

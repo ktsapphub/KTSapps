@@ -1,0 +1,6 @@
+{
+  "eyebrow": "Key To Success Apps",
+  "subhead": "A <em>home base</em> for the web apps, tools and experiments I build — each one living on its own subdomain, free to try.",
+  "primaryCta":   { "label": "Explore the apps", "href": "#apps" },
+  "secondaryCta": { "label": "What this is",     "href": "#about" }
+}

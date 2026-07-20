@@ -1,0 +1,80 @@
+{
+  "label": "01 — The collection",
+  "title": "Six projects,<br>one subdomain each.",
+  "intro": "Hover to bring a project forward. Tap any card to flip it — you'll get a short clip of it running, the numbers behind it, and a way in.",
+  "note": "Every project here is free to use. None of them are for commercial sale.",
+  "items": [
+    {
+      "name": "Bloom View",
+      "status": "live",
+      "tint": "#ff6eb4",
+      "url": "https://bloomview.ktsapps.com",
+      "description": "A calmer way to see what's growing — visual tracking that turns slow progress into something you can actually watch happen.",
+      "cover": "",
+      "clip": "",
+      "downloads": 12400,
+      "impressions": 486000,
+      "revenue": null
+    },
+    {
+      "name": "IG Scout",
+      "status": "live",
+      "tint": "#8c6eff",
+      "url": "https://igscout.ktsapps.com",
+      "description": "Research Instagram profiles and content without the doomscroll. Search, surface and compare what's actually performing.",
+      "cover": "",
+      "clip": "",
+      "downloads": 21800,
+      "impressions": 1240000,
+      "revenue": null
+    },
+    {
+      "name": "Big Valid",
+      "status": "beta",
+      "tint": "#50e6a0",
+      "url": "https://bigvalid.ktsapps.com",
+      "description": "Bulk validation that tells you the truth fast. Paste a list, get clean results, keep moving — no dashboard tour required.",
+      "cover": "",
+      "clip": "",
+      "downloads": 8600,
+      "impressions": 312000,
+      "revenue": null
+    },
+    {
+      "name": "Experience Finder",
+      "status": "beta",
+      "tint": "#ffb45a",
+      "url": "https://experiencefinder.ktsapps.com",
+      "description": "Stop searching \"things to do near me\" and getting ads. Tell it the mood, the budget and the day — it does the rest.",
+      "cover": "",
+      "clip": "",
+      "downloads": 5300,
+      "impressions": 198000,
+      "revenue": null
+    },
+    {
+      "name": "Event Scout",
+      "status": "dev",
+      "tint": "#4fd8ff",
+      "url": "https://eventscout.ktsapps.com",
+      "description": "Everything happening near you, pulled into one feed you can actually filter. Built because five event sites is four too many.",
+      "cover": "",
+      "clip": "",
+      "downloads": 1900,
+      "impressions": 74000,
+      "revenue": null
+    },
+    {
+      "name": "Date Jar",
+      "status": "live",
+      "tint": "#ff5c8c",
+      "url": "https://datejar.ktsapps.com",
+      "description": "Pull a date night out of a jar. For couples who keep saying \"we should do something\" and never decide what.",
+      "cover": "",
+      "clip": "",
+      "downloads": 34200,
+      "impressions": 2100000,
+      "revenue": null
+    }
+  ]
+}

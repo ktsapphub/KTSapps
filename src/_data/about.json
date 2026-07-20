@@ -1,0 +1,12 @@
+{
+  "label": "02 — The idea",
+  "creed": "Software should earn its place. I build small, sharp tools that solve one real problem well — then <em>put them somewhere anyone can use them.</em>",
+  "pillars": [
+    { "title": "Ship it small",
+      "body": "A tool that exists beats a platform that doesn't. Every project starts at the smallest version that's genuinely useful." },
+    { "title": "Open by default",
+      "body": "Free to try, no signup wall before you understand what a thing does. Demos stay up." },
+    { "title": "Built to feel good",
+      "body": "Speed, motion and clarity aren't decoration. They're the difference between a tool you use once and one you keep." }
+  ]
+}

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{{ pageTitle or site.title }}</title>
+<meta name="description" content="{{ pageDescription or site.description }}" />
+<meta name="theme-color" content="#050507" />
+<meta property="og:title" content="{{ pageTitle or site.title }}" />
+<meta property="og:description" content="{{ pageDescription or site.description }}" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="{{ site.url }}" />
+{% if site.ogImage %}<meta property="og:image" content="{{ site.url }}{{ site.ogImage }}" />{% endif %}
+<meta name="twitter:card" content="summary_large_image" />
+{% if noindex %}<meta name="robots" content="noindex, nofollow" />{% endif %}
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/site.css">
+
+{# ---- Umami: privacy-first, no cookies, so no consent banner needed ---- #}
+{% if site.analytics.enabled and site.analytics.websiteId %}
+<script defer
+        src="{{ site.analytics.scriptUrl }}"
+        data-website-id="{{ site.analytics.websiteId }}"></script>
+{% endif %}
+</head>
+<body{% if bodyClass %} class="{{ bodyClass }}"{% endif %}>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="aurora" aria-hidden="true">
+  <div class="bleed bleed--a"></div><div class="bleed bleed--b"></div><div class="bleed bleed--c"></div>
+</div>
+<div class="rails" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<div class="cursor" aria-hidden="true"></div>
+<div class="cursor-dot" aria-hidden="true"></div>
+
+{% if not hideLoader %}
+<div class="loader" id="loader" role="status" aria-label="Loading {{ site.logoMark }}{{ site.logoSuffix }}">
+  <div class="loader__mark" aria-hidden="true">{% for c in site.logoMark %}<span>{{ c }}</span>{% endfor %}</div>
+  <div class="loader__bar" id="loaderbar"></div>
+</div>
+{% endif %}
+
+<header class="nav" id="nav">
+  <div class="wrap nav__in">
+    <a class="nav__logo" href="/" aria-label="{{ site.logoMark }}{{ site.logoSuffix }} home">
+      <b>{{ site.logoMark }}</b><i>{{ site.logoSuffix }}</i>
+    </a>
+    <nav class="nav__links" aria-label="Primary">
+      {% if site.sections.projects %}<a class="nav-hide" href="/#apps">Apps</a>{% endif %}
+      {% if site.sections.about %}<a class="nav-hide" href="/#about">About</a>{% endif %}
+      {% if site.sections.contact %}<a class="nav__cta" href="/#contact">Get in touch</a>{% endif %}
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+{{ content | safe }}
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <h2 class="footmark" id="footmark" aria-label="{{ site.logoMark }}{{ site.logoSuffix }}">
+      {% for c in (site.logoMark + site.logoSuffix) | upper %}<span aria-hidden="true">{{ c }}</span>{% endfor %}
+    </h2>
+    <div class="foot__bar">
+      <span>&copy; <span id="yr"></span> {{ site.logoMark }}{{ site.logoSuffix }} — Key To Success Apps</span>
+      <span>{{ site.footerNote }}</span>
+    </div>
+  </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+<script src="/assets/js/site.js" defer></script>
+</body>
+</html>

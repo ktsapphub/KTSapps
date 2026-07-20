@@ -1,0 +1,33 @@
+{
+  "title": "KTSapps — Key To Success Apps",
+  "description": "A home for the web apps, tools and experiments I build — each one on its own subdomain, free to try.",
+  "url": "https://ktsapps.com",
+  "logoMark": "KTS",
+  "logoSuffix": "apps",
+  "ogImage": "/assets/og.jpg",
+  "analytics": {
+    "enabled": true,
+    "scriptUrl": "https://cloud.umami.is/script.js",
+    "websiteId": "e95cf66f-d447-4b22-af77-41752a1daf44",
+    "trackOutboundClicks": true
+  },
+  "sections": {
+    "hero": true,
+    "marquee": true,
+    "projects": true,
+    "about": true,
+    "contact": true
+  },
+  "marquee": {
+    "speedSeconds": 34,
+    "items": [
+      "Web apps",
+      "Tools",
+      "Prototypes",
+      "Built in public",
+      "Free to try",
+      "Always shipping"
+    ]
+  },
+  "footerNote": "Built & maintained solo"
+}

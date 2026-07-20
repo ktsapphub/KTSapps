@@ -1,0 +1,177 @@
+---
+layout: base.njk
+permalink: /index.html
+---
+
+{# ============ HERO ============ #}
+{% if site.sections.hero %}
+<section class="hero" id="top">
+  <div class="wrap">
+    {% if hero.eyebrow %}
+    <p class="eyebrow"><span class="dot" aria-hidden="true"></span> {{ hero.eyebrow }}</p>
+    {% endif %}
+
+    <h1 class="mark" aria-label="{{ site.logoMark }}{{ site.logoSuffix }}">
+      <span class="markwrap" aria-hidden="true">
+        {% for c in site.logoMark %}<span class="mark__l"><span>{{ c }}</span></span>{% endfor %}
+        <span class="mark__sweep"></span>
+      </span>
+      <span class="mark__suffix" aria-hidden="true"><span>{{ site.logoSuffix }}</span></span>
+    </h1>
+
+    <p class="hero__sub rv" data-d="1">{{ hero.subhead | safe }}</p>
+
+    <div class="hero__row rv" data-d="2">
+      {% if hero.primaryCta.label %}
+      <a class="btn btn--primary" href="{{ hero.primaryCta.href }}" data-magnetic>
+        {{ hero.primaryCta.label }}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </a>
+      {% endif %}
+      {% if hero.secondaryCta.label %}
+      <a class="btn btn--ghost" href="{{ hero.secondaryCta.href }}" data-magnetic>{{ hero.secondaryCta.label }}</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="scrollcue" aria-hidden="true"><span class="scrollcue__line"></span>Scroll</div>
+</section>
+{% endif %}
+
+{# ============ MARQUEE ============ #}
+{% if site.sections.marquee and site.marquee.items.length %}
+<div class="band" aria-hidden="true">
+  <div class="band__track" style="animation-duration:{{ site.marquee.speedSeconds }}s">
+    {# rendered twice so the -50% translate loops seamlessly #}
+    {% for pass in [1,2] %}{% for item in site.marquee.items %}<span class="band__item">{{ item }}</span>{% endfor %}{% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ============ PROJECTS ============ #}
+{% if site.sections.projects and projects.items.length %}
+<section class="sec" id="apps">
+  <div class="wrap">
+    <div class="sec__head rv">
+      {% if projects.label %}<span class="sec__label">{{ projects.label }}</span>{% endif %}
+      <h2 class="sec__title">{{ projects.title | safe }}</h2>
+      {% if projects.intro %}<p class="sec__desc">{{ projects.intro }}</p>{% endif %}
+    </div>
+
+    <div class="grid" id="grid">
+      {% for p in projects.items %}
+        {% set slug = p.name | slugify %}
+        {% set statusLabel = { live: "Live", beta: "Beta", dev: "In development", concept: "Concept" } %}
+      <article class="card rv" data-d="{{ loop.index0 % 3 }}" style="--tint:{{ p.tint | rgbTriplet }}" data-slug="{{ slug }}">
+        <div class="card__inner">
+
+          <div class="face face--front">
+            <div class="card__media">
+              <div class="art" aria-hidden="true"><span class="art__glyph">{{ p.name | monogram }}</span></div>
+              {% if p.cover %}<img src="{{ p.cover }}" alt="" loading="lazy" decoding="async" data-cover>{% endif %}
+              <span class="tag tag--{{ p.status }}"><i aria-hidden="true"></i>{{ statusLabel[p.status] or p.status }}</span>
+            </div>
+            <div class="card__body">
+              <h3 class="card__name">{{ p.name }}</h3>
+              <p class="card__desc">{{ p.description }}</p>
+              {% if p.url %}<span class="card__url">{{ p.url | replace("https://","") | replace("http://","") }}</span>{% endif %}
+            </div>
+            <button class="flipbtn" type="button" aria-expanded="false" aria-controls="back-{{ slug }}">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg>
+              Watch it work
+            </button>
+          </div>
+
+          <div class="face face--back" id="back-{{ slug }}">
+            <div class="clip">
+              <div class="clip__fallback">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor" stroke="none"/></svg>
+                Clip coming soon
+              </div>
+              {% if p.clip %}
+              <video muted loop playsinline preload="none" data-clip aria-label="{{ p.name }} demo clip">
+                <source src="{{ p.clip }}" type="video/mp4">
+              </video>
+              {% endif %}
+            </div>
+
+            <ul class="stats">
+              <li class="stat"><span class="stat__n" data-count="{{ p.downloads or 0 }}">0</span><span class="stat__l">Downloads</span></li>
+              <li class="stat"><span class="stat__n" data-count="{{ p.impressions or 0 }}">0</span><span class="stat__l">Impressions</span></li>
+              {% if p.revenue %}
+              <li class="stat stat--rev"><span class="stat__n" data-count="{{ p.revenue }}" data-prefix="$">0</span><span class="stat__l">Revenue</span></li>
+              {% else %}
+              <li class="stat stat--wide stat--none"><span class="stat__n">Not for commercial sale</span><span class="stat__l">Revenue</span></li>
+              {% endif %}
+            </ul>
+
+            <div class="back__foot">
+              {% if p.url %}
+              <a class="btn btn--ghost btn--sm" href="{{ p.url }}" rel="noopener"
+                 {% if site.analytics.trackOutboundClicks %}data-umami-event="open-project" data-umami-event-project="{{ p.name }}"{% endif %}>
+                Open {{ p.name }}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg>
+              </a>
+              {% endif %}
+              <button class="flipbtn" type="button" data-close aria-label="Close {{ p.name }} preview">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </article>
+      {% endfor %}
+
+      {% if projects.note %}<p class="card__note rv">{{ projects.note }}</p>{% endif %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ============ ABOUT ============ #}
+{% if site.sections.about %}
+<section class="sec" id="about">
+  <div class="wrap">
+    <div class="sec__head rv"><span class="sec__label">{{ about.label }}</span></div>
+
+    <div class="creed-grid">
+      <p class="creed" data-creed>{{ about.creed | safe }}</p>
+
+      <div class="pillars">
+        {% for pillar in about.pillars %}
+        <div class="pillar rv" data-d="{{ loop.index0 }}">
+          <span class="pillar__n">{{ "0" ~ loop.index }}</span>
+          <h3>{{ pillar.title }}</h3>
+          <p>{{ pillar.body }}</p>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ============ CONTACT ============ #}
+{% if site.sections.contact %}
+<section class="sec contact" id="contact">
+  <div class="wrap">
+    <div class="sec__head rv" style="margin-inline:auto">
+      <span class="sec__label" style="text-align:center">{{ contact.label }}</span>
+      <h2 class="sec__title" style="text-align:center">{{ contact.title | safe }}</h2>
+    </div>
+
+    <a class="contact__mail rv" data-d="1" data-magnetic href="mailto:{{ contact.email }}"
+       {% if site.analytics.trackOutboundClicks %}data-umami-event="email-click"{% endif %}>{{ contact.email }}</a>
+
+    {% if contact.socials.length %}
+    <div class="socials rv" data-d="2">
+      {% for s in contact.socials %}
+      <a href="{{ s.href }}" rel="noopener"
+         {% if site.analytics.trackOutboundClicks %}data-umami-event="social-click" data-umami-event-network="{{ s.label }}"{% endif %}>{{ s.label }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}

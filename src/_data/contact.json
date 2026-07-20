@@ -1,0 +1,10 @@
+{
+  "label": "03 — Say hello",
+  "title": "Got an idea, a bug,<br>or just curious?",
+  "email": "keytosuccessapps@gmail.com",
+  "socials": [
+    { "label": "GitHub",   "href": "https://github.com/" },
+    { "label": "X",        "href": "https://x.com/" },
+    { "label": "LinkedIn", "href": "https://linkedin.com/" }
+  ]
+}

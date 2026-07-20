@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /stats/
+
+Sitemap: https://ktsapps.com/sitemap.xml
