@@ -1,0 +1,66 @@
+# Mission Control deploy — installed by build.ktsapps.com.
+# Deploys this repo's Cloudflare Worker: `main` → production, `staging` → staging.
+# Skips cleanly when the repo has no wrangler config yet (before the launch port).
+# Secrets are set by the hub: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, HUB_URL, HUB_WEBHOOK_SECRET.
+name: Mission Control Deploy
+run-name: "deploy · ${{ github.ref_name }}"
+
+on:
+  push:
+    branches: [main, staging]
+  workflow_dispatch:
+    inputs:
+      target: { description: "production | staging", required: false, type: string, default: production }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUB_URL: ${{ secrets.HUB_URL }}
+      HUB_SECRET: ${{ secrets.HUB_WEBHOOK_SECRET }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TARGET: ${{ inputs.target || (github.ref_name == 'staging' && 'staging' || 'production') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Vision · check deploy config"
+        id: cfg
+        shell: bash
+        run: |
+          if [ -f wrangler.jsonc ] || [ -f wrangler.json ] || [ -f wrangler.toml ]; then echo "has=1" >> "$GITHUB_OUTPUT"; else echo "No wrangler config yet; nothing to deploy."; fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::warning::CLOUDFLARE_API_TOKEN is not set on this repo. The hub sets it when the agent pack is installed."; fi
+
+      - uses: actions/setup-node@v4
+        if: steps.cfg.outputs.has == '1'
+        with: { node-version: "20" }
+
+      - name: "Vision · deploy to ${{ env.TARGET }}"
+        id: deploy
+        if: steps.cfg.outputs.has == '1' && env.CLOUDFLARE_API_TOKEN != ''
+        shell: bash
+        run: |
+          if [ -f package.json ]; then (npm ci || npm install); fi
+          if [ "$TARGET" = "staging" ]; then npx --yes wrangler@4 deploy --env staging 2>&1 | tee /tmp/deploy.log; else npx --yes wrangler@4 deploy 2>&1 | tee /tmp/deploy.log; fi
+          exit ${PIPESTATUS[0]}
+
+      - name: "Report to hub"
+        if: always() && steps.cfg.outputs.has == '1'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          if [ -z "$HUB_URL" ]; then exit 0; fi
+          TAIL=$(tail -c 1500 /tmp/deploy.log 2>/dev/null || true)
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg target "$TARGET" --arg outcome "$OUTCOME" --arg sha "$GITHUB_SHA" \
+                --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --arg log "$TAIL" \
+                '{repo:$repo, target:$target, outcome:$outcome, sha:$sha, actions_url:$url, log:$log}' \
+          | curl -s -X POST "$HUB_URL/api/hooks/deploy" -H "authorization: Bearer $HUB_SECRET" -H "content-type: application/json" --data-binary @- || true
