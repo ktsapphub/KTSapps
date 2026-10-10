@@ -1,0 +1,389 @@
+# Mission Control agent — installed by build.ktsapps.com.
+# The hub dispatches this workflow; Claude Code does the work on a branch,
+# opens a PR, and reports cost + memory (HANDOFF.md) back to the hub.
+#
+# Repo secrets:
+#   ANTHROPIC_API_KEY    required
+#   HUB_URL              https://build.ktsapps.com  (optional; without it the hub polls)
+#   HUB_WEBHOOK_SECRET   must match the hub's secret (optional, with HUB_URL)
+#   HUB_PR_TOKEN         optional PAT so the PR triggers other workflows (preview deploys via Actions)
+name: Mission Control Agent
+run-name: "hub:${{ inputs.run_id }} · ${{ inputs.mode }} · ${{ inputs.title }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:    { description: "Hub run id", required: true, type: string }
+      mode:      { description: "build | update | assess | productize | mobile", required: true, type: string, default: update }
+      prompt:    { description: "Compiled prompt from the hub", required: true, type: string }
+      model:     { description: "Model id", required: false, type: string, default: "" }
+      max_turns: { description: "Turn cap", required: false, type: string, default: "30" }
+      title:     { description: "PR title", required: false, type: string, default: "Mission Control run" }
+      gateway:   { description: "1 = route Claude Code through the OmniRoute gateway", required: false, type: string, default: "0" }
+      subagent_model: { description: "Model for subagents (delegated subtasks)", required: false, type: string, default: "" }
+      resume_from: { description: "Branch of a previous attempt to continue from (hub Continue)", required: false, type: string, default: "" }
+      base_branch: { description: "Branch to start from and open the PR into (staging-first projects)", required: false, type: string, default: "" }
+      mobile_dir: { description: "Expo app folder (mobile projects); empty = no phone preview", required: false, type: string, default: "" }
+      mobile_build: { description: "android = also start an EAS preview build", required: false, type: string, default: "" }
+      max_minutes: { description: "Time limit for the agent step, in minutes", required: false, type: string, default: "40" }
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: hub-${{ inputs.run_id }}
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      MODE: ${{ inputs.mode }}
+      HUB_URL: ${{ secrets.HUB_URL }}
+      HUB_SECRET: ${{ secrets.HUB_WEBHOOK_SECRET }}
+    steps:
+      - name: "Rogue · checkout & load memory"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.base_branch }}
+          token: ${{ secrets.HUB_PR_TOKEN || github.token }}
+
+      - name: "Rogue · prepare branch, sync skills + memory"
+        shell: bash
+        env:
+          RESUME_FROM: ${{ inputs.resume_from }}
+        run: |
+          git config user.name "mission-control[bot]"
+          git config user.email "mission-control@users.noreply.github.com"
+          git checkout -b "hub/$RUN_ID"
+          # Continue: start from the previous attempt's work instead of from scratch.
+          case "$RESUME_FROM" in
+            "") ;;
+            *[!A-Za-z0-9._/-]*) echo "::warning::Ignoring resume branch with unexpected characters" ;;
+            *) if git fetch -q origin "$RESUME_FROM" 2>/dev/null; then
+                 git merge --no-edit -q FETCH_HEAD && echo "resume: continuing from $RESUME_FROM ($(git rev-list --count HEAD ^origin/HEAD 2>/dev/null || echo '?') commits ahead)"
+               else echo "resume: $RESUME_FROM was never pushed; starting from the default branch with the previous handoff"; fi ;;
+          esac
+          mkdir -p .claude .hub
+          if [ -f .claude/HANDOFF.md ]; then echo "memory: HANDOFF.md ($(wc -l < .claude/HANDOFF.md) lines)"; else echo "memory: none yet"; fi
+          # Pull the live skill pack from the hub so every run uses the current skills
+          # (memory, usage, security, design...) without a PR to this repo.
+          SYNCED=0; PACKV=""; CODE=""
+          [ -n "$HUB_URL" ] && CODE=$(curl -s -o /tmp/pack.json -w '%{http_code}' "$HUB_URL/api/hooks/skillpack" -H "authorization: Bearer $HUB_SECRET" || true)
+          # Only a real skill pack counts. A login page (e.g. Cloudflare Access in front of the hub) must never fail the run.
+          if [ "$CODE" = "200" ] && jq -e '.files | type == "object"' /tmp/pack.json >/dev/null 2>&1; then
+            while IFS= read -r f; do
+              case "$f" in /*|*..*) continue ;; esac
+              mkdir -p ".claude/skills/$(dirname "$f")"
+              jq -j --arg f "$f" '.files[$f]' /tmp/pack.json > ".claude/skills/$f"
+              SYNCED=$((SYNCED+1))
+            done < <(jq -r '.files | keys[]' /tmp/pack.json)
+            PACKV=$(jq -r '.version' /tmp/pack.json)
+            echo "skills: synced $SYNCED files from hub (pack $PACKV)"
+          elif [ -n "$HUB_URL" ]; then
+            echo "::warning::HUB_UNREACHABLE: $HUB_URL/api/hooks/skillpack answered HTTP ${CODE:-none} without a skill pack. If it's 302 or a login page, Cloudflare Access (or another login) sits in front of the hub: add a Bypass for /api/hooks/* or remove it. Using the skills committed in this repo."
+          else
+            echo "skills: using the copy committed in .claude/skills (HUB_URL not set)"
+          fi
+          if [ -n "$HUB_URL" ]; then
+            curl -s -o /dev/null -X POST "$HUB_URL/api/hooks/run" -H "authorization: Bearer $HUB_SECRET" -H "content-type: application/json" \
+              -d "{\"run_id\":\"$RUN_ID\",\"phase\":\"started\",\"skills_synced\":$SYNCED,\"skills_version\":\"$PACKV\",\"actions_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}" || true
+          fi
+
+      # Second brain: a local code knowledge graph (tree-sitter, no LLM, no API cost).
+      # Agents read graphify-out/GRAPH_REPORT.md and query the graph instead of re-reading files.
+      - name: "Storm · official Expo skills"
+        if: inputs.mode == 'mobile' || inputs.mobile_dir != ''
+        continue-on-error: true
+        env:
+          EXPO_SKILLS_SHA: d4f484024fec15196bfd3c272e953e3f983972cf   # github.com/expo/skills, pinned; bump on purpose
+        run: |
+          D="$RUNNER_TEMP/expo-skills"
+          git init -q "$D" && git -C "$D" remote add origin https://github.com/expo/skills.git
+          git -C "$D" fetch -q --depth 1 origin "$EXPO_SKILLS_SHA" && git -C "$D" checkout -q FETCH_HEAD
+          mkdir -p .claude/skills
+          n=0; for s in "$D"/plugins/expo/skills/*/; do b=$(basename "$s"); [ -e ".claude/skills/$b" ] || { cp -r "$s" ".claude/skills/$b"; n=$((n+1)); }; done
+          echo "Expo skills added: $n"
+
+      - name: "Rogue · restore code graph"
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: graphify-out
+          key: graphify-${{ github.repository }}-${{ github.sha }}
+          restore-keys: graphify-${{ github.repository }}-
+
+      - name: "Rogue · build code graph (graphify)"
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          pipx install graphifyy >/dev/null 2>&1 || python3 -m pip install --user -q graphifyy
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          graphify update . 2>&1 | tail -3 || echo "graph build skipped"
+          graphify install --platform claude >/dev/null 2>&1 || true
+          [ -f graphify-out/GRAPH_REPORT.md ] && head -12 graphify-out/GRAPH_REPORT.md || true
+
+      # Optional model gateway (OmniRoute): used when the hub routes this run through it,
+      # e.g. as a fallback when Claude is rate-limited or out of credits.
+      - name: "Hub · model routing"
+        id: route
+        shell: bash
+        env:
+          GW: ${{ inputs.gateway }}
+          OMNI_URL: ${{ secrets.OMNIROUTE_URL }}
+          OMNI_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
+          SUB: ${{ inputs.subagent_model }}
+        run: |
+          if [ "$GW" = "1" ] && [ -n "$OMNI_URL" ] && [ -n "$OMNI_KEY" ]; then
+            echo "::add-mask::$OMNI_KEY"
+            echo "ANTHROPIC_BASE_URL=${OMNI_URL%/}" >> "$GITHUB_ENV"
+            echo "ANTHROPIC_AUTH_TOKEN=$OMNI_KEY" >> "$GITHUB_ENV"
+            echo "gw=1" >> "$GITHUB_OUTPUT"
+            echo "Routing through the OmniRoute gateway"
+          else
+            echo "gw=0" >> "$GITHUB_OUTPUT"
+            [ "$GW" = "1" ] && echo "::warning::Gateway requested but OMNIROUTE_URL / OMNIROUTE_API_KEY are not set; using Claude directly."
+            true
+          fi
+          case "$SUB" in ""|*[!A-Za-z0-9._/-]*) ;; *) echo "CLAUDE_CODE_SUBAGENT_MODEL=$SUB" >> "$GITHUB_ENV" ;; esac
+
+      # MCP servers for every run: Context7 (current library docs), Playwright (real browser
+      # checks), Firecrawl (web search/scrape, only when FIRECRAWL_API_KEY is set).
+      - name: "Hub · MCP servers"
+        continue-on-error: true
+        shell: bash
+        env:
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        run: |
+          echo '{"mcpServers":{}}' > "$RUNNER_TEMP/mcp.json"   # safe default if anything below fails
+          npx -y playwright@latest install --with-deps chromium >/dev/null 2>&1 || echo "::warning::Playwright browser install failed; the browser MCP may not work this run."
+          jq -n --arg fc "$FIRECRAWL_API_KEY" --arg c7 "$CONTEXT7_API_KEY" '
+            {mcpServers: ({
+              context7: ({command: "npx", args: ["-y", "@upstash/context7-mcp"]} + (if $c7 != "" then {env: {CONTEXT7_API_KEY: $c7}} else {} end)),
+              playwright: {command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--browser", "chromium"]}
+            } + (if $fc != "" then {firecrawl: {command: "npx", args: ["-y", "firecrawl-mcp"], env: {FIRECRAWL_API_KEY: $fc}}} else {} end))}' > "$RUNNER_TEMP/mcp.json"
+          jq -r '.mcpServers | keys | join(", ")' "$RUNNER_TEMP/mcp.json" | sed 's/^/MCP servers: /'
+
+      - name: "Vision · Railway CLI (guarded)"
+        id: railway
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_API_TOKEN$RAILWAY_TOKEN" ]; then echo "No Railway key for this repo (only Railway projects you approve get one)."; exit 0; fi
+          npm i -g @railway/cli@4 >/dev/null 2>&1 || { echo "::warning::Railway CLI install failed"; exit 0; }
+          REAL=$(command -v railway); TGT=$(readlink -f "$REAL"); rm -f "$REAL"
+          cat > "$REAL" <<'SHIM'
+          #!/usr/bin/env bash
+          # Mission Control guard around the Railway CLI: agents may work in staging/preview
+          # environments; production and anything destructive stay with Bretton.
+          REAL="$RAILWAY_REAL"
+          deny() { echo "Blocked by Mission Control: $1. Production on Railway changes only through Promote to production (Bretton). Use -e staging." >&2; exit 3; }
+          sub="$1"; all=" $* "
+          case "$sub" in delete|down|init|unlink) deny "'railway $sub' isn't allowed for agents";; esac
+          [ "$sub" = environment ] && [[ "$all" =~ " delete " || "$all" =~ " rm " ]] && deny "deleting environments"
+          mut=0
+          case "$sub" in up|deploy|redeploy|domain|volume|add|service|connect|run|shell|ssh|scale) mut=1;; esac
+          [ "$sub" = variables ] && [[ "$all" =~ " --set" || "$all" =~ " -s " || "$all" =~ " set " || "$all" =~ " delete" ]] && mut=1
+          if [ "$mut" = 1 ]; then
+            ENV=$(printf '%s\n' "$@" | awk 'f{print;exit} /^(-e|--environment)$/{f=1} /^--environment=/{sub(/^--environment=/,"");print;exit}')
+            [ -n "$ENV" ] || deny "'railway $sub' needs an explicit environment (-e staging)"
+            echo "$ENV" | grep -qiE '^(production|prod|live|main)$' && deny "agents don't change the production environment"
+          fi
+          exec "$REAL" "$@"
+          SHIM
+          sed -i "s#^REAL=.*#REAL=$TGT#" "$REAL"; chmod +x "$REAL"
+          echo "on=1" >> "$GITHUB_OUTPUT"; railway whoami 2>/dev/null | head -1 || true
+
+      - name: "Agent team · Claude Code"
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        # Hard time limit: a stuck or looping agent is stopped instead of running the hour out.
+        timeout-minutes: ${{ fromJSON(inputs.max_minutes || '40') }}
+        # The action fails a run that FINISHED but used a few more turns than the cap; the next step keeps that work.
+        continue-on-error: true
+        env:
+          RAILWAY_API_TOKEN: ${{ steps.railway.outputs.on == '1' && secrets.RAILWAY_API_TOKEN || '' }}
+          RAILWAY_TOKEN: ${{ steps.railway.outputs.on == '1' && secrets.RAILWAY_TOKEN || '' }}
+        with:
+          anthropic_api_key: ${{ steps.route.outputs.gw == '1' && secrets.OMNIROUTE_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: ${{ inputs.prompt }}
+          # Efficiency skill packs: ponytail (laziest code that works) + agent-skills (spec → ship lifecycle).
+          plugin_marketplaces: |
+            https://github.com/DietrichGebert/ponytail.git
+            https://github.com/addyosmani/agent-skills.git
+            https://github.com/HKUDS/CLI-Anything.git
+          plugins: |
+            ponytail@ponytail
+            agent-skills@addy-agent-skills
+            cli-anything@cli-anything
+          claude_args: >-
+            --max-turns ${{ inputs.max_turns }}
+            --mcp-config ${{ runner.temp }}/mcp.json
+            ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            --allowedTools "Edit,MultiEdit,Write,Read,Glob,Grep,LS,Task,TodoWrite,WebFetch,Bash(npm *),Bash(npx *),Bash(pnpm *),Bash(yarn *),Bash(node *),Bash(python *),Bash(python3 *),Bash(pip *),Bash(pytest *),Bash(git status),Bash(git diff *),Bash(git log *),Bash(ls *),Bash(cat *),Bash(mkdir *),Bash(rm *),Bash(mv *),Bash(cp *),Bash(cd *),Bash(find *),Bash(grep *),Bash(rg *),Bash(sed *),Bash(awk *),Bash(head *),Bash(tail *),Bash(wc *),Bash(sort *),Bash(uniq *),Bash(touch *),Bash(chmod *),Bash(echo *),Bash(printf *),Bash(diff *),Bash(test *),Bash(jq *),Bash(curl *),Bash(sleep *),Bash(timeout *),Bash(kill *),Bash(bun *),Bash(bunx *),Bash(uv *),Bash(git show *),Bash(git rm *),Bash(git mv *),Bash(graphify *),Bash(pipx *),Bash(railway *),mcp__context7,mcp__playwright,mcp__firecrawl"
+
+      - name: "Hub · did the agent finish?"
+        id: verdict
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          SUB=""
+          [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ] && SUB=$(jq -r '[.[] | select(.type=="result")] | last | .subtype // empty' "$EXEC_FILE" 2>/dev/null)
+          if [ "$OUTCOME" = "success" ] || [ "$SUB" = "success" ]; then
+            [ "$OUTCOME" = "success" ] || echo "::notice::The agent finished its work but went past the turn cap; keeping the work."
+            echo "ok=1" >> "$GITHUB_OUTPUT"; echo "outcome=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"; echo "outcome=${OUTCOME:-failure}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Punisher · checks"
+        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1'
+        continue-on-error: true
+        run: |
+          if [ -f package.json ] && grep -q '"test"' package.json; then
+            (npm ci || npm install) && npm test --if-present
+          else
+            echo "No test script found; skipping."
+          fi
+
+      - name: "Storm · phone preview"
+        id: mobile
+        if: inputs.mobile_dir != '' && inputs.mode != 'assess' && steps.verdict.outputs.ok == '1'
+        continue-on-error: true
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MDIR: ${{ inputs.mobile_dir }}
+          MBUILD: ${{ inputs.mobile_build }}
+        run: |
+          say() { echo "error=$1" >> "$GITHUB_OUTPUT"; echo "::warning::$1"; }
+          if [ -z "$EXPO_TOKEN" ]; then say "EXPO_TOKEN isn't set (Setup → Mobile previews)"; exit 0; fi
+          APP=""
+          for d in "$MDIR" apps/mobile mobile .; do
+            if [ -n "$d" ] && { [ -f "$d/app.json" ] || ls "$d"/app.config.* >/dev/null 2>&1; } && grep -q '"expo"' "$d/package.json" 2>/dev/null; then APP="$d"; break; fi
+          done
+          if [ -z "$APP" ]; then say "no Expo app found yet (looked in $MDIR, apps/mobile, mobile)"; exit 0; fi
+          ROOT=$PWD
+          if [ -f pnpm-lock.yaml ]; then npx -y pnpm@9 install --frozen-lockfile=false >/dev/null 2>&1 || true
+          elif [ -f yarn.lock ]; then yarn install >/dev/null 2>&1 || true
+          elif [ -f package-lock.json ]; then npm install --no-audit --no-fund >/dev/null 2>&1 || true; fi
+          cd "$APP"
+          [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null 2>&1 || true
+          # First preview links the app to EAS (writes the project id into app config, committed with the PR).
+          npx -y eas-cli@latest init --non-interactive --force >/tmp/eas-init.log 2>&1 || true
+          npx -y eas-cli@latest update:configure --platform all --non-interactive >/dev/null 2>&1 || true
+          CFG=$(npx expo config --json 2>/dev/null || echo '{}')
+          SLUG=$(echo "$CFG" | jq -r '.slug // empty')
+          OWNER=$(echo "$CFG" | jq -r '.owner // empty')
+          [ -n "$OWNER" ] || OWNER=$(npx -y eas-cli@latest whoami 2>/dev/null | head -1)
+          if OUT=$(npx -y eas-cli@latest update --branch "hub-$RUN_ID" --message "Mission Control run $RUN_ID" --non-interactive --json 2>/tmp/eas-update.err); then
+            GROUP=$(echo "$OUT" | jq -r '.[0].group // empty' 2>/dev/null)
+            if [ -n "$GROUP" ] && [ -n "$SLUG" ] && [ -n "$OWNER" ]; then echo "preview=https://expo.dev/accounts/$OWNER/projects/$SLUG/updates/$GROUP" >> "$GITHUB_OUTPUT"; fi
+          else
+            say "EAS update failed: $(tail -c 220 /tmp/eas-update.err | tr '\n' ' ')"
+          fi
+          if [ "$MBUILD" = "android" ]; then
+            if B=$(npx -y eas-cli@latest build --platform android --profile preview --no-wait --non-interactive --json 2>/tmp/eas-build.err); then
+              BID=$(echo "$B" | jq -r '.[0].id // empty' 2>/dev/null)
+              [ -n "$BID" ] && echo "build=https://expo.dev/accounts/$OWNER/projects/$SLUG/builds/$BID" >> "$GITHUB_OUTPUT"
+            else
+              say "Android preview build didn't start: $(tail -c 220 /tmp/eas-build.err | tr '\n' ' ') (first build may need a one-time 'eas build -p android --profile preview' on your PC to create the keystore)"
+            fi
+          fi
+          cd "$ROOT"
+
+      - name: "Vision · commit, push & open PR"
+        id: pr
+        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1'
+        env:
+          GH_TOKEN: ${{ secrets.HUB_PR_TOKEN || github.token }}
+          TITLE: ${{ inputs.title }}
+          BASE: ${{ inputs.base_branch }}
+        run: |
+          git add -A
+          git reset -q -- .hub 2>/dev/null || true
+          git reset -q -- .claude/skills 2>/dev/null || true   # synced skills are not part of the change
+          git reset -q -- graphify-out 2>/dev/null || true     # the code graph is cached, not committed
+          if git diff --cached --quiet; then echo "No changes to commit."; exit 0; fi
+          git commit -q -m "$TITLE" -m "Mission Control run $RUN_ID ($MODE)"
+          git push -q -u origin "hub/$RUN_ID"
+          {
+            printf 'Mission Control run `%s` (%s)\n\n' "$RUN_ID" "$MODE"
+            cat .hub/summary.md 2>/dev/null || true
+          } > /tmp/body.md
+          # Some repos don't let Actions open PRs; the branch is pushed, so the hub opens it instead.
+          if URL=$(gh pr create --title "$TITLE" --body-file /tmp/body.md --head "hub/$RUN_ID" ${BASE:+--base "$BASE"} 2>/tmp/pr.err); then
+            echo "url=$URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Could not open the PR from Actions ($(head -c 200 /tmp/pr.err)). The hub will open it from hub/$RUN_ID."
+          fi
+
+      - name: "Vision · deliver files"
+        if: always()
+        continue-on-error: true
+        run: |
+          [ -d .hub/out ] || { echo "No deliverables this run."; exit 0; }
+          find .hub/out -type f \( -name '.env*' -o -name '*.pem' -o -name '*.key' \) -delete
+          N=$(find .hub/out -type f | wc -l); echo "Deliverables: $N file(s)"
+          [ "$N" -gt 0 ] || exit 0
+          if [ -n "$HUB_URL" ]; then
+            find .hub/out -type f -size -20M | head -40 | while read -r f; do
+              rel="${f#.hub/out/}"
+              curl -s -o /dev/null -w "%{http_code} $rel\n" -X POST "$HUB_URL/api/hooks/output" -H "authorization: Bearer $HUB_SECRET" \
+                -F "run_id=$RUN_ID" -F "file=@$f;filename=$rel" || true
+            done
+          fi
+
+      - name: "Vision · keep deliverables on GitHub too"
+        if: always() && hashFiles('.hub/out/**') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: deliverables-${{ inputs.run_id }}
+          path: .hub/out/
+          retention-days: 30
+
+      - name: "Hub · mark a failed agent run"
+        if: always() && steps.verdict.outputs.ok != '1'
+        run: |
+          echo "::error::The agent didn't finish (${{ steps.claude.outcome }})."
+          exit 1
+
+      - name: "Report to hub"
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          OUTCOME: ${{ steps.verdict.outputs.outcome || steps.claude.outcome }}
+          M_PREVIEW: ${{ steps.mobile.outputs.preview }}
+          M_BUILD: ${{ steps.mobile.outputs.build }}
+          M_ERROR: ${{ steps.mobile.outputs.error }}
+        run: |
+          if [ -z "$HUB_URL" ]; then echo "HUB_URL not set; the hub will poll GitHub instead."; exit 0; fi
+          RESULT='{}'
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            RESULT=$(jq -c '[.[] | select(.type=="result")] | last // {}' "$EXEC_FILE" 2>/dev/null || echo '{}')
+          fi
+          touch .hub/summary.md .claude/HANDOFF.md
+          head -c 6000 graphify-out/GRAPH_REPORT.md > /tmp/graph.md 2>/dev/null || : > /tmp/graph.md
+          jq -n --arg run_id "$RUN_ID" --arg outcome "$OUTCOME" --arg pr "$PR_URL" \
+                --arg mp "$M_PREVIEW" --arg mb "$M_BUILD" --arg me "$M_ERROR" \
+                --rawfile summary .hub/summary.md --rawfile handoff .claude/HANDOFF.md --rawfile graph /tmp/graph.md \
+                --argjson result "$RESULT" \
+                '{run_id:$run_id, phase:"finished", outcome:$outcome, pr_url:$pr, mobile_preview:$mp, mobile_build:$mb, mobile_error:$me, summary:$summary, handoff:$handoff, graph:$graph,
+                  cost_usd:($result.total_cost_usd // null), usage:($result.usage // null), turns:($result.num_turns // null),
+                  subtype:($result.subtype // null), denials_count:($result.permission_denials_count // (($result.permission_denials // []) | length)),
+                  denials:(($result.permission_denials // []) | map(.tool_input.command // .tool_name // "") | .[0:12])}' \
+          | curl -s -X POST "$HUB_URL/api/hooks/run" -H "authorization: Bearer $HUB_SECRET" -H "content-type: application/json" --data-binary @- || true
