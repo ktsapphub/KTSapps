@@ -4,6 +4,9 @@
 #
 # Repo secrets:
 #   ANTHROPIC_API_KEY    required
+#   OPENAI_API_KEY       optional: ChatGPT (Codex CLI) takes over when Claude is out of credits / rate-limited
+#   XAI_API_KEY          optional: Grok (Codex CLI on xAI's API) when Claude / ChatGPT can't
+#   GEMINI_API_KEY       optional: Gemini CLI takes over when the others can't
 #   HUB_URL              https://build.ktsapps.com  (optional; without it the hub polls)
 #   HUB_WEBHOOK_SECRET   must match the hub's secret (optional, with HUB_URL)
 #   HUB_PR_TOKEN         optional PAT so the PR triggers other workflows (preview deploys via Actions)
@@ -26,6 +29,9 @@ on:
       mobile_dir: { description: "Expo app folder (mobile projects); empty = no phone preview", required: false, type: string, default: "" }
       mobile_build: { description: "android = also start an EAS preview build", required: false, type: string, default: "" }
       max_minutes: { description: "Time limit for the agent step, in minutes", required: false, type: string, default: "40" }
+      engine: { description: "claude | codex | gemini (hub picks by usage, or a fallback when Claude is out of credits)", required: false, type: string, default: "claude" }
+      alt_model: { description: "Model for Codex / Gemini (blank = their default)", required: false, type: string, default: "" }
+      alt_effort: { description: "Codex reasoning effort: minimal | low | medium | high", required: false, type: string, default: "" }
 
 permissions:
   contents: write
@@ -206,6 +212,7 @@ jobs:
 
       - name: "Agent team · Claude Code"
         id: claude
+        if: inputs.engine != 'codex' && inputs.engine != 'gemini'
         uses: anthropics/claude-code-action@v1
         # Hard time limit: a stuck or looping agent is stopped instead of running the hour out.
         timeout-minutes: ${{ fromJSON(inputs.max_minutes || '40') }}
@@ -241,13 +248,94 @@ jobs:
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             --allowedTools "Edit,MultiEdit,Write,Read,Glob,Grep,LS,Task,TodoWrite,WebFetch,Bash(npm *),Bash(npx *),Bash(pnpm *),Bash(yarn *),Bash(node *),Bash(python *),Bash(python3 *),Bash(pip *),Bash(pytest *),Bash(git status),Bash(git diff *),Bash(git log *),Bash(ls *),Bash(cat *),Bash(mkdir *),Bash(rm *),Bash(mv *),Bash(cp *),Bash(cd *),Bash(find *),Bash(grep *),Bash(rg *),Bash(sed *),Bash(awk *),Bash(head *),Bash(tail *),Bash(wc *),Bash(sort *),Bash(uniq *),Bash(touch *),Bash(chmod *),Bash(echo *),Bash(printf *),Bash(diff *),Bash(test *),Bash(jq *),Bash(curl *),Bash(sleep *),Bash(timeout *),Bash(kill *),Bash(bun *),Bash(bunx *),Bash(uv *),Bash(git show *),Bash(git rm *),Bash(git mv *),Bash(graphify *),Bash(pipx *),Bash(railway *),mcp__context7,mcp__playwright,mcp__firecrawl"
 
+      # Fallback engine: ChatGPT (Codex CLI), then Gemini CLI. Runs when the hub started this run on a
+      # fallback, or when Claude stopped because of credits / rate limits / overload (not for other errors).
+      - name: "Agent team · fallback engine (ChatGPT / Grok / Gemini)"
+        id: alt
+        if: always() && (inputs.engine == 'codex' || inputs.engine == 'grok' || inputs.engine == 'gemini' || steps.claude.outcome == 'failure')
+        timeout-minutes: ${{ fromJSON(inputs.max_minutes || '40') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          ENGINE: ${{ inputs.engine }}
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          TASK: ${{ inputs.prompt }}
+          ALT_MODEL: ${{ inputs.alt_model }}
+          ALT_EFFORT: ${{ inputs.alt_effort }}
+        run: |
+          case "$ALT_MODEL" in *[!A-Za-z0-9._:/-]*) ALT_MODEL="";; esac
+          case "$ALT_EFFORT" in minimal|low|medium|high) ;; *) ALT_EFFORT="";; esac
+          REASON=""
+          if [ "$ENGINE" != codex ] && [ "$ENGINE" != grok ] && [ "$ENGINE" != gemini ]; then
+            LOG=""; [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ] && LOG=$(tail -c 20000 "$EXEC_FILE")
+            SUB=$(printf '%s' "$LOG" | jq -r '[.[]? | select(.type=="result")] | last | .subtype // empty' 2>/dev/null || true)
+            [ "$SUB" = success ] && { echo "used=0" >> "$GITHUB_OUTPUT"; exit 0; }
+            if printf '%s' "$LOG" | grep -qiE 'credit balance|billing|insufficient|quota'; then REASON="Claude is out of credits"
+            elif printf '%s' "$LOG" | grep -qiE 'rate.?limit|429|529|overloaded'; then REASON="Claude is rate-limited"
+            elif [ -z "$LOG" ]; then REASON="Claude couldn't start"
+            else echo "Claude stopped for a reason a fallback won't fix; not switching."; echo "used=0" >> "$GITHUB_OUTPUT"; exit 0; fi
+            ENGINE=""
+          else
+            REASON="Mission Control routed this run here to spread usage"
+          fi
+          # Pick the first engine that has a key, starting from the one the hub asked for.
+          has() { case "$1" in codex) [ -n "$OPENAI_API_KEY" ];; grok) [ -n "$XAI_API_KEY" ];; gemini) [ -n "$GEMINI_API_KEY" ];; esac; }
+          ORDER="codex grok gemini"; [ -n "$ENGINE" ] && ORDER="$ENGINE $ORDER"
+          PICK=""; for e in $ORDER; do has "$e" && { PICK="$e"; break; }; done
+          ENGINE="$PICK"
+          if [ -z "$ENGINE" ]; then
+            echo "::error::$REASON and no OPENAI_API_KEY, XAI_API_KEY or GEMINI_API_KEY is set on this repo, so nothing can take over."
+            echo "used=1" >> "$GITHUB_OUTPUT"; echo "ok=0" >> "$GITHUB_OUTPUT"; echo "reason=$REASON" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "engine=$ENGINE" >> "$GITHUB_OUTPUT"; echo "reason=$REASON" >> "$GITHUB_OUTPUT"; echo "used=1" >> "$GITHUB_OUTPUT"
+          echo "::notice::$REASON · switching to $ENGINE"
+          NOTE="Note: you are taking over this task from another agent. Run git status first; keep any useful work already in the tree and finish the task. Follow AGENTS.md / CLAUDE.md and the skills in .claude/skills when they apply."
+          OK=0; FIRST="$ENGINE"
+          run_codex() { # $1 = openai | xai
+            npm ls -g @openai/codex >/dev/null 2>&1 || npm i -g @openai/codex@latest >/dev/null 2>&1
+            local M="$ALT_MODEL" X=()
+            if [ "$1" = xai ]; then
+              [ "$FIRST" = grok ] || M=""; X=(-c 'model_providers.xai={name="xAI",base_url="https://api.x.ai/v1",env_key="XAI_API_KEY",wire_api="responses"}' -c model_provider=xai); M="${M:-grok-4}"
+            else
+              [ "$FIRST" = codex ] || M=""; printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1
+            fi
+            codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "${X[@]}" ${M:+-m "$M"} ${ALT_EFFORT:+-c model_reasoning_effort="$ALT_EFFORT"} -o "$RUNNER_TEMP/alt-last.txt" "$TASK
+
+          $NOTE"
+          }
+          run_gemini() {
+            npm i -g @google/gemini-cli@latest >/dev/null 2>&1
+            local GM=""; [ "$FIRST" = gemini ] && GM="$ALT_MODEL"
+            gemini --yolo ${GM:+-m "$GM"} -p "$TASK
+
+          $NOTE" > "$RUNNER_TEMP/alt-last.txt"
+          }
+          # Try the chosen engine, then the others that have keys.
+          for e in $FIRST codex grok gemini; do
+            [ "$OK" = 1 ] && break; has "$e" || continue
+            case " $TRIED " in *" $e "*) continue;; esac; TRIED="$TRIED $e"
+            [ "$e" != "$FIRST" ] && echo "::warning::Previous engine didn't finish; trying $e." && echo "engine=$e" >> "$GITHUB_OUTPUT"
+            case "$e" in codex) run_codex openai && OK=1;; grok) run_codex xai && OK=1;; gemini) run_gemini && OK=1;; esac
+          done
+          [ -f "$RUNNER_TEMP/alt-last.txt" ] && tail -c 3000 "$RUNNER_TEMP/alt-last.txt"
+          echo "ok=$OK" >> "$GITHUB_OUTPUT"
+
       - name: "Hub · did the agent finish?"
         id: verdict
         if: always()
         env:
           EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
           OUTCOME: ${{ steps.claude.outcome }}
+          ALT_USED: ${{ steps.alt.outputs.used }}
+          ALT_OK: ${{ steps.alt.outputs.ok }}
         run: |
+          if [ "$ALT_USED" = 1 ]; then
+            if [ "$ALT_OK" = 1 ]; then echo "ok=1" >> "$GITHUB_OUTPUT"; echo "outcome=success" >> "$GITHUB_OUTPUT"; else echo "ok=0" >> "$GITHUB_OUTPUT"; echo "outcome=failure" >> "$GITHUB_OUTPUT"; fi
+            exit 0
+          fi
           SUB=""
           [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ] && SUB=$(jq -r '[.[] | select(.type=="result")] | last | .subtype // empty' "$EXEC_FILE" 2>/dev/null)
           if [ "$OUTCOME" = "success" ] || [ "$SUB" = "success" ]; then
@@ -324,8 +412,11 @@ jobs:
           git reset -q -- .hub 2>/dev/null || true
           git reset -q -- .claude/skills 2>/dev/null || true   # synced skills are not part of the change
           git reset -q -- graphify-out 2>/dev/null || true     # the code graph is cached, not committed
-          if git diff --cached --quiet; then echo "No changes to commit."; exit 0; fi
-          git commit -q -m "$TITLE" -m "Mission Control run $RUN_ID ($MODE)"
+          # A fallback engine (Codex / Gemini) may have committed its own work: push that too.
+          BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
+          AHEAD=$(git rev-list --count "$BASEREF"..HEAD 2>/dev/null || echo 0)
+          if git diff --cached --quiet && [ "$AHEAD" = 0 ]; then echo "No changes to commit."; exit 0; fi
+          git diff --cached --quiet || git commit -q -m "$TITLE" -m "Mission Control run $RUN_ID ($MODE)"
           git push -q -u origin "hub/$RUN_ID"
           {
             printf 'Mission Control run `%s` (%s)\n\n' "$RUN_ID" "$MODE"
@@ -378,6 +469,8 @@ jobs:
           M_PREVIEW: ${{ steps.mobile.outputs.preview }}
           M_BUILD: ${{ steps.mobile.outputs.build }}
           M_ERROR: ${{ steps.mobile.outputs.error }}
+          ENG: ${{ steps.alt.outputs.used == '1' && (steps.alt.outputs.engine || 'none') || 'claude' }}
+          ENG_REASON: ${{ steps.alt.outputs.reason }}
         run: |
           if [ -z "$HUB_URL" ]; then echo "HUB_URL not set; the hub will poll GitHub instead."; exit 0; fi
           RESULT='{}'
@@ -386,11 +479,11 @@ jobs:
           fi
           touch .hub/summary.md .claude/HANDOFF.md
           head -c 6000 graphify-out/GRAPH_REPORT.md > /tmp/graph.md 2>/dev/null || : > /tmp/graph.md
-          jq -n --arg run_id "$RUN_ID" --arg outcome "$OUTCOME" --arg pr "$PR_URL" \
+          jq -n --arg run_id "$RUN_ID" --arg outcome "$OUTCOME" --arg pr "$PR_URL" --arg engine "$ENG" --arg engine_reason "$ENG_REASON" \
                 --arg mp "$M_PREVIEW" --arg mb "$M_BUILD" --arg me "$M_ERROR" \
                 --rawfile summary .hub/summary.md --rawfile handoff .claude/HANDOFF.md --rawfile graph /tmp/graph.md \
                 --argjson result "$RESULT" \
-                '{run_id:$run_id, phase:"finished", outcome:$outcome, pr_url:$pr, mobile_preview:$mp, mobile_build:$mb, mobile_error:$me, summary:$summary, handoff:$handoff, graph:$graph,
+                '{run_id:$run_id, phase:"finished", outcome:$outcome, pr_url:$pr, engine:$engine, engine_reason:$engine_reason, mobile_preview:$mp, mobile_build:$mb, mobile_error:$me, summary:$summary, handoff:$handoff, graph:$graph,
                   cost_usd:($result.total_cost_usd // null), usage:($result.usage // null), turns:($result.num_turns // null),
                   subtype:($result.subtype // null), denials_count:($result.permission_denials_count // (($result.permission_denials // []) | length)),
                   denials:(($result.permission_denials // []) | map(.tool_input.command // .tool_name // "") | .[0:12])}' \
