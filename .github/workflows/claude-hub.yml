@@ -302,12 +302,24 @@ jobs:
             else
               [ "$FIRST" = codex ] || M=""; printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1
             fi
-            codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "${X[@]}" ${M:+-m "$M"} ${ALT_EFFORT:+-c model_reasoning_effort="$ALT_EFFORT"} -o "$RUNNER_TEMP/alt-last.txt" "$TASK
+            # OpenAI / xAI cap tokens per minute. When Codex stops on that limit, wait for the window
+            # to reset and carry on from the work already in the tree (up to 2 more tries).
+            local try=0 rc=0 GO="$NOTE"
+            while :; do
+              codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "${X[@]}" ${M:+-m "$M"} ${ALT_EFFORT:+-c model_reasoning_effort="$ALT_EFFORT"} -o "$RUNNER_TEMP/alt-last.txt" "$TASK
 
-          $NOTE"
+          $GO" 2>&1 | tee "$RUNNER_TEMP/codex.log"; rc=${PIPESTATUS[0]}
+              [ "$rc" = 0 ] && return 0
+              grep -qiE 'rate limit (reached|exceeded)|tokens per min|TPM|429' "$RUNNER_TEMP/codex.log" || return "$rc"
+              try=$((try+1)); [ "$try" -le 2 ] || return "$rc"
+              echo "::notice::$( [ "$1" = xai ] && echo Grok || echo ChatGPT ) hit its per-minute token limit; waiting 75s, then continuing from the work so far (try $((try+1)) of 3)."
+              sleep 75
+              GO="$NOTE You were stopped by a rate limit partway through. Check git status and git diff, keep what's there, and finish the remaining work."
+            done
           }
           run_gemini() {
             npm i -g @google/gemini-cli@latest >/dev/null 2>&1
+            export GEMINI_CLI_TRUST_WORKSPACE=true   # headless runner: trust the checked-out repo
             local GM=""; [ "$FIRST" = gemini ] && GM="$ALT_MODEL"
             gemini --yolo ${GM:+-m "$GM"} -p "$TASK
 
@@ -322,6 +334,7 @@ jobs:
           done
           [ -f "$RUNNER_TEMP/alt-last.txt" ] && tail -c 3000 "$RUNNER_TEMP/alt-last.txt"
           echo "ok=$OK" >> "$GITHUB_OUTPUT"
+          [ "$OK" = 1 ] || echo "::error::No engine finished. $( [ -n "$(git status --porcelain -- . ':!.hub' ':!.claude/skills' ':!graphify-out' 2>/dev/null)" ] && echo 'Work so far is saved to the run branch so Continue picks it up.' || echo 'No changes were made.')"
 
       - name: "Hub · did the agent finish?"
         id: verdict
@@ -400,9 +413,27 @@ jobs:
           fi
           cd "$ROOT"
 
+      # A Cloudflare app must build before it gets a PR: a dry-run deploy bundles the Worker (catching
+      # missing imports) and runs the build command, without touching Cloudflare.
+      - name: "Vision · will it deploy?"
+        id: deploycheck
+        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1' && (hashFiles('wrangler.jsonc') != '' || hashFiles('wrangler.json') != '' || hashFiles('wrangler.toml') != '')
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          if timeout 900 npx --yes wrangler@4 deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-dry" 2>&1 | tee "$RUNNER_TEMP/deploycheck.log"; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"; echo "Builds and bundles cleanly."
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            FIRST=$(grep -m1 -E 'Could not resolve|ERROR|error' "$RUNNER_TEMP/deploycheck.log" | sed 's/^[^A-Za-z]*//' | head -c 200)
+            echo "::error::DEPLOY_CHECK_FAILED The app doesn't build yet: ${FIRST}"
+            grep -E 'Could not resolve|\[ERROR\]' "$RUNNER_TEMP/deploycheck.log" | head -20 > "$RUNNER_TEMP/deploycheck-errors.txt" || true
+            mkdir -p .hub && { echo "## Deploy check failed"; echo; echo '```'; cat "$RUNNER_TEMP/deploycheck-errors.txt"; echo '```'; } >> .hub/summary.md
+          fi
+
       - name: "Vision · commit, push & open PR"
         id: pr
-        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1'
+        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1' && steps.deploycheck.outputs.ok != '0'
         env:
           GH_TOKEN: ${{ secrets.HUB_PR_TOKEN || github.token }}
           TITLE: ${{ inputs.title }}
@@ -454,8 +485,26 @@ jobs:
           path: .hub/out/
           retention-days: 30
 
+      # Unfinished work isn't thrown away: it goes to the run's branch (no PR), so pressing Continue
+      # (or the hub's own retry) starts from it instead of from scratch.
+      - name: "Vision · save unfinished work"
+        if: always() && inputs.mode != 'assess' && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.ok == '0')
+        continue-on-error: true
+        env:
+          BASE: ${{ inputs.base_branch }}
+        run: |
+          git add -A
+          git reset -q -- .hub 2>/dev/null || true
+          git reset -q -- .claude/skills 2>/dev/null || true
+          git reset -q -- graphify-out 2>/dev/null || true
+          BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
+          AHEAD=$(git rev-list --count "$BASEREF"..HEAD 2>/dev/null || echo 0)
+          if git diff --cached --quiet && [ "$AHEAD" = 0 ]; then echo "Nothing to save."; exit 0; fi
+          git diff --cached --quiet || git commit -q -m "WIP: unfinished work from run $RUN_ID" -m "Saved so the next attempt continues from here. Not reviewed."
+          git push -q -u origin "hub/$RUN_ID" && echo "::notice::Unfinished work saved to hub/$RUN_ID. Continue picks it up from there."
+
       - name: "Hub · mark a failed agent run"
-        if: always() && steps.verdict.outputs.ok != '1'
+        if: always() && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.ok == '0')
         run: |
           echo "::error::The agent didn't finish (${{ steps.claude.outcome }})."
           exit 1
@@ -465,7 +514,7 @@ jobs:
         env:
           EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
           PR_URL: ${{ steps.pr.outputs.url }}
-          OUTCOME: ${{ steps.verdict.outputs.outcome || steps.claude.outcome }}
+          OUTCOME: ${{ steps.deploycheck.outputs.ok == '0' && 'failure' || steps.verdict.outputs.outcome || steps.claude.outcome }}
           M_PREVIEW: ${{ steps.mobile.outputs.preview }}
           M_BUILD: ${{ steps.mobile.outputs.build }}
           M_ERROR: ${{ steps.mobile.outputs.error }}
