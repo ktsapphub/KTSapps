@@ -92,6 +92,15 @@ jobs:
             done < <(jq -r '.files | keys[]' /tmp/pack.json)
             PACKV=$(jq -r '.version' /tmp/pack.json)
             echo "skills: synced $SYNCED files from hub (pack $PACKV)"
+            # Agent rules edited in the hub (Team → Rules) apply here on this run.
+            if jq -e '.agents | type == "object"' /tmp/pack.json >/dev/null 2>&1; then
+              mkdir -p .claude/agents; AG=0
+              while IFS= read -r f; do
+                case "$f" in */*|*..*|"") continue ;; esac
+                jq -j --arg f "$f" '.agents[$f]' /tmp/pack.json > ".claude/agents/$f"; AG=$((AG+1))
+              done < <(jq -r '.agents | keys[]' /tmp/pack.json)
+              echo "agents: synced $AG rule files from hub"
+            fi
           elif [ -n "$HUB_URL" ]; then
             echo "::warning::HUB_UNREACHABLE: $HUB_URL/api/hooks/skillpack answered HTTP ${CODE:-none} without a skill pack. If it's 302 or a login page, Cloudflare Access (or another login) sits in front of the hub: add a Bypass for /api/hooks/* or remove it. Using the skills committed in this repo."
           else
@@ -334,7 +343,7 @@ jobs:
           done
           [ -f "$RUNNER_TEMP/alt-last.txt" ] && tail -c 3000 "$RUNNER_TEMP/alt-last.txt"
           echo "ok=$OK" >> "$GITHUB_OUTPUT"
-          [ "$OK" = 1 ] || echo "::error::No engine finished. $( [ -n "$(git status --porcelain -- . ':!.hub' ':!.claude/skills' ':!graphify-out' 2>/dev/null)" ] && echo 'Work so far is saved to the run branch so Continue picks it up.' || echo 'No changes were made.')"
+          [ "$OK" = 1 ] || echo "::error::No engine finished. $( [ -n "$(git status --porcelain -- . ':!.hub' ':!.claude/skills' ':!.claude/agents' ':!graphify-out' 2>/dev/null)" ] && echo 'Work so far is saved to the run branch so Continue picks it up.' || echo 'No changes were made.')"
 
       - name: "Hub · did the agent finish?"
         id: verdict
@@ -441,7 +450,7 @@ jobs:
         run: |
           git add -A
           git reset -q -- .hub 2>/dev/null || true
-          git reset -q -- .claude/skills 2>/dev/null || true   # synced skills are not part of the change
+          git reset -q -- .claude/skills .claude/agents 2>/dev/null || true   # synced skills and agent rules are not part of the change
           git reset -q -- graphify-out 2>/dev/null || true     # the code graph is cached, not committed
           # A fallback engine (Codex / Gemini) may have committed its own work: push that too.
           BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
@@ -495,7 +504,7 @@ jobs:
         run: |
           git add -A
           git reset -q -- .hub 2>/dev/null || true
-          git reset -q -- .claude/skills 2>/dev/null || true
+          git reset -q -- .claude/skills .claude/agents 2>/dev/null || true
           git reset -q -- graphify-out 2>/dev/null || true
           BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
           AHEAD=$(git rev-list --count "$BASEREF"..HEAD 2>/dev/null || echo 0)
