@@ -92,6 +92,15 @@ jobs:
             done < <(jq -r '.files | keys[]' /tmp/pack.json)
             PACKV=$(jq -r '.version' /tmp/pack.json)
             echo "skills: synced $SYNCED files from hub (pack $PACKV)"
+            # Agent rules edited in the hub (Team → Rules) apply here on this run.
+            if jq -e '.agents | type == "object"' /tmp/pack.json >/dev/null 2>&1; then
+              mkdir -p .claude/agents; AG=0
+              while IFS= read -r f; do
+                case "$f" in */*|*..*|"") continue ;; esac
+                jq -j --arg f "$f" '.agents[$f]' /tmp/pack.json > ".claude/agents/$f"; AG=$((AG+1))
+              done < <(jq -r '.agents | keys[]' /tmp/pack.json)
+              echo "agents: synced $AG rule files from hub"
+            fi
           elif [ -n "$HUB_URL" ]; then
             echo "::warning::HUB_UNREACHABLE: $HUB_URL/api/hooks/skillpack answered HTTP ${CODE:-none} without a skill pack. If it's 302 or a login page, Cloudflare Access (or another login) sits in front of the hub: add a Bypass for /api/hooks/* or remove it. Using the skills committed in this repo."
           else
@@ -334,7 +343,7 @@ jobs:
           done
           [ -f "$RUNNER_TEMP/alt-last.txt" ] && tail -c 3000 "$RUNNER_TEMP/alt-last.txt"
           echo "ok=$OK" >> "$GITHUB_OUTPUT"
-          [ "$OK" = 1 ] || echo "::error::No engine finished. $( [ -n "$(git status --porcelain -- . ':!.hub' ':!.claude/skills' ':!graphify-out' 2>/dev/null)" ] && echo 'Work so far is saved to the run branch so Continue picks it up.' || echo 'No changes were made.')"
+          [ "$OK" = 1 ] || echo "::error::No engine finished. $( [ -n "$(git status --porcelain -- . ':!.hub' ':!.claude/skills' ':!.claude/agents' ':!graphify-out' 2>/dev/null)" ] && echo 'Work so far is saved to the run branch so Continue picks it up.' || echo 'No changes were made.')"
 
       - name: "Hub · did the agent finish?"
         id: verdict
@@ -417,14 +426,16 @@ jobs:
       # missing imports) and runs the build command, without touching Cloudflare.
       - name: "Vision · will it deploy?"
         id: deploycheck
+        # Outputs are words on purpose: when this step is skipped (no wrangler config, e.g. Railway
+        # repos) its output is empty, and GitHub compares empty and '0' as equal numbers.
         if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1' && (hashFiles('wrangler.jsonc') != '' || hashFiles('wrangler.json') != '' || hashFiles('wrangler.toml') != '')
         continue-on-error: true
         run: |
           set -o pipefail
           if timeout 900 npx --yes wrangler@4 deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-dry" 2>&1 | tee "$RUNNER_TEMP/deploycheck.log"; then
-            echo "ok=1" >> "$GITHUB_OUTPUT"; echo "Builds and bundles cleanly."
+            echo "result=pass" >> "$GITHUB_OUTPUT"; echo "Builds and bundles cleanly."
           else
-            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "result=fail" >> "$GITHUB_OUTPUT"
             FIRST=$(grep -m1 -E 'Could not resolve|ERROR|error' "$RUNNER_TEMP/deploycheck.log" | sed 's/^[^A-Za-z]*//' | head -c 200)
             echo "::error::DEPLOY_CHECK_FAILED The app doesn't build yet: ${FIRST}"
             grep -E 'Could not resolve|\[ERROR\]' "$RUNNER_TEMP/deploycheck.log" | head -20 > "$RUNNER_TEMP/deploycheck-errors.txt" || true
@@ -433,7 +444,7 @@ jobs:
 
       - name: "Vision · commit, push & open PR"
         id: pr
-        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1' && steps.deploycheck.outputs.ok != '0'
+        if: inputs.mode != 'assess' && steps.verdict.outputs.ok == '1' && steps.deploycheck.outputs.result != 'fail'
         env:
           GH_TOKEN: ${{ secrets.HUB_PR_TOKEN || github.token }}
           TITLE: ${{ inputs.title }}
@@ -441,7 +452,7 @@ jobs:
         run: |
           git add -A
           git reset -q -- .hub 2>/dev/null || true
-          git reset -q -- .claude/skills 2>/dev/null || true   # synced skills are not part of the change
+          git reset -q -- .claude/skills .claude/agents 2>/dev/null || true   # synced skills and agent rules are not part of the change
           git reset -q -- graphify-out 2>/dev/null || true     # the code graph is cached, not committed
           # A fallback engine (Codex / Gemini) may have committed its own work: push that too.
           BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
@@ -488,14 +499,14 @@ jobs:
       # Unfinished work isn't thrown away: it goes to the run's branch (no PR), so pressing Continue
       # (or the hub's own retry) starts from it instead of from scratch.
       - name: "Vision · save unfinished work"
-        if: always() && inputs.mode != 'assess' && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.ok == '0')
+        if: always() && inputs.mode != 'assess' && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.result == 'fail')
         continue-on-error: true
         env:
           BASE: ${{ inputs.base_branch }}
         run: |
           git add -A
           git reset -q -- .hub 2>/dev/null || true
-          git reset -q -- .claude/skills 2>/dev/null || true
+          git reset -q -- .claude/skills .claude/agents 2>/dev/null || true
           git reset -q -- graphify-out 2>/dev/null || true
           BASEREF="origin/${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
           AHEAD=$(git rev-list --count "$BASEREF"..HEAD 2>/dev/null || echo 0)
@@ -504,9 +515,10 @@ jobs:
           git push -q -u origin "hub/$RUN_ID" && echo "::notice::Unfinished work saved to hub/$RUN_ID. Continue picks it up from there."
 
       - name: "Hub · mark a failed agent run"
-        if: always() && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.ok == '0')
+        if: always() && (steps.verdict.outputs.ok != '1' || steps.deploycheck.outputs.result == 'fail')
         run: |
-          echo "::error::The agent didn't finish (${{ steps.claude.outcome }})."
+          if [ "${{ steps.deploycheck.outputs.result }}" = "fail" ]; then echo "::error::DEPLOY_CHECK_FAILED_MARK The agent finished, but the app doesn't build, so no PR was opened. The work is saved on the run's branch."
+          else echo "::error::The agent didn't finish (${{ steps.claude.outcome }})."; fi
           exit 1
 
       - name: "Report to hub"
@@ -514,7 +526,7 @@ jobs:
         env:
           EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
           PR_URL: ${{ steps.pr.outputs.url }}
-          OUTCOME: ${{ steps.deploycheck.outputs.ok == '0' && 'failure' || steps.verdict.outputs.outcome || steps.claude.outcome }}
+          OUTCOME: ${{ steps.deploycheck.outputs.result == 'fail' && 'failure' || steps.verdict.outputs.outcome || steps.claude.outcome }}
           M_PREVIEW: ${{ steps.mobile.outputs.preview }}
           M_BUILD: ${{ steps.mobile.outputs.build }}
           M_ERROR: ${{ steps.mobile.outputs.error }}

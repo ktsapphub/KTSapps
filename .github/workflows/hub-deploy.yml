@@ -1,5 +1,7 @@
 # Mission Control deploy — installed by build.ktsapps.com.
 # Deploys this repo's Cloudflare Worker: `main` → production, `staging` → staging.
+# Every pull request also gets a preview link: a preview version of the STAGING worker
+# (staging data, never production) under the alias pr-<number>, posted on the PR.
 # Skips cleanly when the repo has no wrangler config yet (before the launch port).
 # Secrets are set by the hub: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, HUB_URL, HUB_WEBHOOK_SECRET.
 name: Mission Control Deploy
@@ -8,6 +10,8 @@ run-name: "deploy · ${{ github.ref_name }}"
 on:
   push:
     branches: [main, staging]
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       target: { description: "production | staging", required: false, type: string, default: production }
@@ -16,11 +20,60 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ github.ref_name }}
-  cancel-in-progress: false
+  group: deploy-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  preview:
+    # Same-repo PRs only (forks don't get secrets). Never touches production.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Vision · check preview config"
+        id: cfg
+        shell: bash
+        run: |
+          F=""; for f in wrangler.jsonc wrangler.json wrangler.toml; do [ -f "$f" ] && { F="$f"; break; }; done
+          if [ -z "$F" ]; then echo "No wrangler config yet; no preview."; exit 0; fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::warning::CLOUDFLARE_API_TOKEN is not set on this repo; no preview."; exit 0; fi
+          if grep -Eq '"staging"[[:space:]]*:|\[env\.staging\]' "$F"; then echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "why=This repo has no staging environment in $F, so there's nowhere safe to preview (previews never use production data)." >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-node@v4
+        if: steps.cfg.outputs.ok == '1'
+        with: { node-version: "22" } # wrangler 4 needs Node 22+
+      - name: "Vision · upload preview (staging worker, alias pr-${{ github.event.number }})"
+        id: up
+        if: steps.cfg.outputs.ok == '1'
+        shell: bash
+        run: |
+          if [ -f package.json ]; then (npm ci || npm install) && npm run build --if-present; fi
+          npx --yes wrangler@4 versions upload --env staging --preview-alias "pr-$PR" --message "PR #$PR" 2>&1 | tee /tmp/preview.log
+          URL=$(grep -Eo 'https://pr-[^ ]+\.workers\.dev[^ ]*' /tmp/preview.log | tail -1)
+          [ -n "$URL" ] || URL=$(grep -Eo 'https://[^ ]+\.workers\.dev[^ ]*' /tmp/preview.log | tail -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          [ -n "$URL" ] || echo "::warning::Uploaded, but Cloudflare returned no preview URL. Turn on Preview URLs for the staging worker (Settings → Domains & Routes) and re-run."
+      - name: "Vision · post preview link on the PR"
+        if: always() && (steps.up.outputs.url != '' || steps.cfg.outputs.why != '')
+        shell: bash
+        env:
+          URL: ${{ steps.up.outputs.url }}
+          WHY: ${{ steps.cfg.outputs.why }}
+        run: |
+          if [ -n "$URL" ]; then BODY=$(printf '<!-- hub-preview -->\n**Preview:** %s\n\nStaging data, not production. Updates on every push to this PR.' "$URL"); else BODY=$(printf '<!-- hub-preview -->\nNo preview for this PR. %s' "$WHY"); fi
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[] | select(.body | startswith("<!-- hub-preview -->")) | .id' | tail -1)
+          if [ -n "$ID" ]; then gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$BODY" >/dev/null; else gh pr comment "$PR" --body "$BODY" >/dev/null; fi
+
   deploy:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -41,14 +94,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         if: steps.cfg.outputs.has == '1'
-        with: { node-version: "20" }
+        with: { node-version: "22" } # wrangler 4 needs Node 22+
 
       - name: "Vision · deploy to ${{ env.TARGET }}"
         id: deploy
         if: steps.cfg.outputs.has == '1' && env.CLOUDFLARE_API_TOKEN != ''
         shell: bash
         run: |
-          if [ -f package.json ]; then (npm ci || npm install); fi
+          if [ -f package.json ]; then (npm ci || npm install) && npm run build --if-present; fi
           if [ "$TARGET" = "staging" ]; then npx --yes wrangler@4 deploy --env staging 2>&1 | tee /tmp/deploy.log; else npx --yes wrangler@4 deploy 2>&1 | tee /tmp/deploy.log; fi
           exit ${PIPESTATUS[0]}
 
